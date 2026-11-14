@@ -12,6 +12,7 @@
 //   dc-capture list [--all]
 //   dc-capture capture --window ID --video PATH --audio PATH [--width 1920] [--height 1080] [--fps 60]
 
+import AppKit
 import CoreGraphics
 import CoreMedia
 import CoreVideo
@@ -20,10 +21,17 @@ import ScreenCaptureKit
 
 @main
 struct DCCapture {
+    @MainActor
     static func main() async {
         signal(SIGPIPE, SIG_IGN)
         signal(SIGTERM) { _ in exit(0) }
         signal(SIGINT) { _ in exit(0) }
+
+        // A command-line tool has no WindowServer connection by default, and SCStream
+        // asserts on that (CGS_REQUIRE_INIT). Creating the shared NSApplication sets it
+        // up; .prohibited keeps the helper out of the Dock and app switcher.
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        _ = CGMainDisplayID()
 
         let args = Array(CommandLine.arguments.dropFirst())
         guard let cmd = args.first else { usage(); exit(2) }
