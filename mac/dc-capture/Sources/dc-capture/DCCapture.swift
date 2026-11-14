@@ -201,9 +201,11 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         cfg.channelCount = 2
         cfg.excludesCurrentProcessAudio = true
 
+        logLine("creating stream")
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        logLine("starting capture")
         try await s.startCapture()
         scStream = s
         fputs("dc-capture: capturing window \(o.windowID) at \(o.width)x\(o.height)@\(o.fps)\n", stderr)
@@ -235,6 +237,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 let pb = CMSampleBufferGetImageBuffer(sb)
             else { return }
             lock.lock()
+            if latest == nil { logLine("first video frame \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb))") }
             latest = pb
             lock.unlock()
         case .audio:
@@ -285,7 +288,8 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 out[2 * i + 1] = r[i]
             }
         } else {
-            guard let p = abl[0].mData?.assumingMemoryBound(to: Float.self), channels > 0 else { return }
+            guard abl.count > 0, channels > 0,
+                  let p = abl[0].mData?.assumingMemoryBound(to: Float.self) else { return }
             for i in 0..<frames {
                 out[2 * i] = p[i * channels]
                 out[2 * i + 1] = p[i * channels + (channels > 1 ? 1 : 0)]
@@ -293,6 +297,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         }
 
         lock.lock()
+        if !sawAudio { logLine("first audio: \(frames) frames, \(channels) ch, \(nonInterleaved ? "planar" : "interleaved")") }
         audio.append(contentsOf: out)
         sawAudio = true
         lock.unlock()
@@ -314,6 +319,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             finished = true
             return
         }
+        logLine("audio pipe open")
         var vfd: Int32 = -1
         defer {
             close(afd)
@@ -374,6 +380,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                     exitCode = 1
                     return
                 }
+                logLine("video pipe open; streaming")
             }
             if !frame.withUnsafeBytes({ writeAll(vfd, $0.baseAddress!, $0.count) }) { return }
 
@@ -414,6 +421,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             }
         }
     }
+}
+
+func logLine(_ msg: String) {
+    fputs("dc-capture: \(msg)\n", stderr)
 }
 
 func writeAll(_ fd: Int32, _ ptr: UnsafeRawPointer, _ count: Int) -> Bool {

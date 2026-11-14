@@ -238,7 +238,9 @@ def main() -> None:
                 pass
         for proc in (cap, ff):
             if proc.poll() is None:
-                proc.terminate()
+                # On a failed start ffmpeg is still waiting on its input pipes; kill it
+                # outright so it doesn't print a confusing "Interrupted system call".
+                proc.kill() if code else proc.terminate()
         for proc in (cap, ff):
             try:
                 proc.wait(5)

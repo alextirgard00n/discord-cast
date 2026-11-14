@@ -42,15 +42,16 @@ if ! command -v swift >/dev/null 2>&1; then
 fi
 say "Building the capture helper..."
 LOG="$(mktemp -t dc-build)"
-if ! swift build -c release --package-path mac/dc-capture >"$LOG" 2>&1; then
+# Debug build while we're testing: crashes print a readable reason instead of a bare trap.
+if ! swift build -c debug --package-path mac/dc-capture >"$LOG" 2>&1; then
   grep -E "error|warning: unre" "$LOG" | head -40
   echo "(full log: $LOG)"
   fail "The capture helper didn't build. Send me the errors above."
 fi
-CAP="mac/dc-capture/.build/release/dc-capture"
+CAP="mac/dc-capture/.build/debug/dc-capture"
 [ -x "$CAP" ] || fail "The capture helper didn't build (no binary)."
 
-RUN="app/.venv/bin/python app/discord_cast.py"
+RUN="app/.venv/bin/python app/discord_cast.py --capture-bin $CAP"
 
 # --- TV ------------------------------------------------------------------------------
 DEVFILE="app/.device"
