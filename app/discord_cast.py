@@ -209,6 +209,8 @@ def main() -> None:
     p.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")
     p.add_argument("--capture-bin", default=str(DEFAULT_CAPTURE))
     p.add_argument("--no-cast", action="store_true", help="serve only; open the URL in Safari/VLC")
+    p.add_argument("--preview", action="store_true",
+                   help="don't cast; play the stream in Safari on this Mac (to check the capture side)")
     p.add_argument("--verbose", action="store_true")
     a = p.parse_args()
 
@@ -218,6 +220,8 @@ def main() -> None:
     if a.tvs:
         list_tvs()
         return
+    if a.preview:
+        a.no_cast = True
     if a.window is None or (not a.device and not a.no_cast):
         p.error("--window and --device are required (see --windows / --tvs)")
     if not Path(a.capture_bin).exists():
@@ -287,7 +291,11 @@ def main() -> None:
         shutdown(code=1)
 
     print(f"\nServing: {url}")
-    if a.no_cast:
+    if a.preview:
+        local = f"http://127.0.0.1:{a.port}/index.m3u8"
+        subprocess.run(["open", "-a", "Safari", local])
+        print(f"Playing in Safari: {local}  (Ctrl+C here to stop)")
+    elif a.no_cast:
         print("Open that URL in Safari or VLC. Ctrl+C to stop.")
     else:
         print(f"Casting to {a.device!r}...")

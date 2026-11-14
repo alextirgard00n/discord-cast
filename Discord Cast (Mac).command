@@ -101,8 +101,18 @@ while true; do
   if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt ${#IDS[@]} ]; then continue; fi
 
   WID="${IDS[$((c - 1))]}"
-  say "Casting. Press Ctrl+C to stop and come back to this menu."
+  echo
+  echo "  1) Cast to TV"
+  echo "  2) Cast to TV, 2 s segments (steadier, more delay)"
+  echo "  3) Preview in Safari on this Mac (checks the capture side, no TV)"
+  read -r -p "Choose [1]: " m
+  case "${m:-1}" in
+    2) MODE=(--device "$DEVICE" --segment 2 --buffer 6) ;;
+    3) MODE=(--preview) ;;
+    *) MODE=(--device "$DEVICE") ;;
+  esac
+  say "Running. Press Ctrl+C to stop and come back to this menu."
   trap ':' INT
-  $RUN --window "$WID" --device "$DEVICE"
+  $RUN --window "$WID" "${MODE[@]}"
   trap - INT
 done
