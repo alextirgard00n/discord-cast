@@ -21,9 +21,32 @@ Targets: Windows (RTX) and macOS (Apple silicon). Tested receiver: LG C5 (Google
 
 ## Status
 
-**Phase 0: receiver test.** Before building the native app, `spike/cast_test.py`
-checks what the TV's Cast receiver accepts (H.264 vs HEVC, 1080p vs 4K, 30 vs 60 fps)
-and how much delay it adds. See [docs/PLAN.md](docs/PLAN.md) for the full roadmap.
+- **Phase 0 (done):** the LG C5's Cast receiver plays HEVC 4K60 in fMP4 HLS smoothly.
+  1 s segments work; 0.5 s segments stutter and rebuffer. 30 fps visibly judders, 60 fps doesn't.
+- **Phase 1 (macOS, testing):** cast the popped-out Discord stream window plus Discord's audio,
+  HEVC 1080p60, no upscaling or frame gen yet.
+
+See [docs/PLAN.md](docs/PLAN.md) for the full roadmap.
+
+## Using it (macOS)
+
+1. In Discord, open the stream and pop it out into its own window.
+2. Double-click **`Discord Cast (Mac).command`** in Finder.
+   - First run installs ffmpeg, Python and pychromecast via [Homebrew](https://brew.sh)
+     and builds the capture helper (needs the Xcode Command Line Tools; it offers to install them).
+   - Allow **Local Network** access, and turn on **Screen & System Audio Recording** for
+     Terminal (System Settings → Privacy & Security), then reopen Terminal.
+3. Pick the TV (remembered), then pick the Discord stream window. Ctrl+C stops and returns to the menu.
+
+The window can be covered by other windows, but don't minimize it. Discord plays voice chat
+from the same app as the stream, so voice comes through the TV too.
+
+How it fits together:
+
+- `mac/dc-capture`: Swift helper. ScreenCaptureKit captures one window plus its app's audio and
+  writes raw NV12 video and float audio, paced to 60 fps, into two pipes.
+- `app/discord_cast.py`: runs ffmpeg (VideoToolbox HEVC, 1 s fMP4 HLS), serves it on the LAN,
+  and starts playback on the TV over Cast.
 
 ## Running the Phase 0 test
 

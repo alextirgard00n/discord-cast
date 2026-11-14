@@ -9,3 +9,7 @@ out/
 .idea/
 *.user
 .device
+app/.venv/
+app/.device
+mac/dc-capture/.build/
+mac/dc-capture/.swiftpm/
