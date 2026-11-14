@@ -130,9 +130,15 @@ def source_args(a, w: int, h: int) -> tuple[list[str], list[str]]:
         ain = ["-re", "-f", "lavfi", "-i",
                "aevalsrc=0.4*sin(2*PI*1000*t)*lt(mod(t\\,1)\\,0.1):s=48000:c=stereo"]
         fs = max(24, h // 10)
+        font = ""
+        for f in ("/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf",
+                  "C:/Windows/Fonts/arial.ttf"):
+            if os.path.exists(f):
+                font = "fontfile='" + f.replace(":", "\\:") + "':"
+                break
         vf = [
             f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t,1),0.1)'",
-            f"drawtext=text='%{{pts\\:hms}}':fontsize={fs}:fontcolor=white:box=1:boxcolor=black@0.7:"
+            f"drawtext={font}text='%{{pts\\:hms}}':fontsize={fs}:fontcolor=white:box=1:boxcolor=black@0.7:"
             f"boxborderw={fs // 4}:x=(w-tw)/2:y=h-th-{fs}",
         ]
         return vin + ain, vf
@@ -196,11 +202,16 @@ def import_pychromecast():
         raise SystemExit("pychromecast is missing. Run:  pip install -r requirements.txt")
 
 
-def list_devices() -> None:
+def list_devices(names_only: bool = False) -> None:
     pc = import_pychromecast()
-    print("Looking for Cast devices (5 s)...")
+    if not names_only:
+        print("Looking for Cast devices (5 s)...")
     casts, browser = pc.get_chromecasts(timeout=5)
     pc.discovery.stop_discovery(browser)
+    if names_only:
+        for c in casts:
+            print(c.cast_info.friendly_name)
+        return
     if not casts:
         print("None found. Same network/VLAN? Firewall allowing mDNS (UDP 5353)?")
     for c in casts:
@@ -236,6 +247,7 @@ def cast_stream(a, url: str):
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--list", action="store_true", help="list Cast devices and exit")
+    p.add_argument("--list-names", action="store_true", help="print Cast device names only, one per line")
     p.add_argument("--device", help="Cast device friendly name (see --list)")
     p.add_argument("--source", choices=["pattern", "screen"], default="pattern")
     p.add_argument("--codec", choices=["h264", "hevc"], default="h264")
@@ -255,8 +267,8 @@ def main() -> None:
     p.add_argument("--verbose", action="store_true", help="log every HTTP request")
     a = p.parse_args()
 
-    if a.list:
-        list_devices()
+    if a.list or a.list_names:
+        list_devices(names_only=a.list_names)
         return
     if not a.device and not a.no_cast:
         p.error("--device is required (or use --list / --no-cast)")

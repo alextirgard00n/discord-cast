@@ -27,7 +27,13 @@ and how much delay it adds. See [docs/PLAN.md](docs/PLAN.md) for the full roadma
 
 ## Running the Phase 0 test
 
-Requirements: Python 3.10+, ffmpeg on PATH (with NVENC on Windows, VideoToolbox on macOS).
+**macOS, one click:** double-click `Run Cast Test (Mac).command` in Finder. It
+installs ffmpeg, Python and pychromecast through Homebrew if they're missing, asks
+which TV to use (and remembers it), then shows a menu with every test in the table
+below. Allow **Local Network** access when macOS asks, and **Screen Recording** for
+the screen test. Requires [Homebrew](https://brew.sh).
+
+**Manual:** Python 3.10+, ffmpeg on PATH (with NVENC on Windows, VideoToolbox on macOS).
 
 ```sh
 cd spike

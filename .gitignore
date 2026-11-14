@@ -8,3 +8,4 @@ out/
 .vscode/
 .idea/
 *.user
+.device
