@@ -10,8 +10,9 @@
 //
 // Usage:
 //   dc-capture list [--all]
-//   dc-capture capture --window ID --video PATH --audio PATH [--width 1920] [--height 1080] [--fps 60]
+//   dc-capture capture --window ID --video PATH --audio PATH [--width 1920] [--height 1080] [--fps 60] [--no-crop]
 
+import Accelerate
 import AppKit
 import CoreGraphics
 import CoreMedia
@@ -86,6 +87,7 @@ struct Options {
     var width = 1920
     var height = 1080
     var fps = 60
+    var crop = true
 
     init(_ args: [String]) throws {
         var i = 0
@@ -97,6 +99,11 @@ struct Options {
         while i < args.count {
             let key = args[i]
             guard key.hasPrefix("--") else { throw CaptureError("unexpected argument \(key)") }
+            if key == "--no-crop" {
+                crop = false
+                i += 1
+                continue
+            }
             let v = try value()
             switch key {
             case "--window": windowID = CGWindowID(v) ?? 0
@@ -152,7 +159,7 @@ func runCapture(_ o: Options) async throws {
     }
 
     let capturer = Capturer(o)
-    try await capturer.start(window: window)
+    try await capturer.start(window: window, content: content)
 
     let writer = Thread { capturer.writerLoop() }
     writer.qualityOfService = .userInteractive
@@ -175,6 +182,12 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     private var audioPrimed = false
     private var sawAudio = false
     private var scStream: SCStream?
+    private var audioStream: SCStream?
+    private var srcWidth = 0
+    private var srcHeight = 0
+    private var audioPeak: Float = 0          // since last report, guarded by lock
+    private var detections: [(time: Double, box: Box)] = []
+    private var currentCrop: Box?
     private let videoQueue = DispatchQueue(label: "dc-capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "dc-capture.audio", qos: .userInteractive)
 
@@ -183,11 +196,20 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
 
     init(_ o: Options) { self.o = o }
 
-    func start(window: SCWindow) async throws {
+    func start(window: SCWindow, content: SCShareableContent) async throws {
+        // Capture the window at its own pixel size (Retina), not squeezed into the output
+        // size. The writer crops away black borders / window chrome and scales to fit.
+        let wf = window.frame
+        let scale = await MainActor.run {
+            NSScreen.screens.first(where: { $0.frame.intersects(wf) })?.backingScaleFactor ?? 2
+        }
+        srcWidth = max(2, Int(window.frame.width * scale) & ~1)
+        srcHeight = max(2, Int(window.frame.height * scale) & ~1)
+
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let cfg = SCStreamConfiguration()
-        cfg.width = o.width
-        cfg.height = o.height
+        cfg.width = srcWidth
+        cfg.height = srcHeight
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         cfg.colorSpaceName = CGColorSpace.itur_709
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(o.fps))
@@ -197,28 +219,63 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         cfg.preservesAspectRatio = true
         // No backgroundColor: the property doesn't retain its CGColor, so a temporary
         // one is freed before SCStream copies the config (crash). The default is black.
-        cfg.capturesAudio = true
-        cfg.sampleRate = 48000
-        cfg.channelCount = 2
-        cfg.excludesCurrentProcessAudio = true
 
-        logLine("creating stream")
+        // Audio. Discord (Electron) plays sound from helper processes, not the process
+        // that owns the window, so a window-only capture hears nothing. Capture audio
+        // separately from every Discord process.
+        let discordApps = content.applications.filter { isDiscord($0) }
+        let display = content.displays.first(where: { $0.frame.intersects(window.frame) }) ?? content.displays.first
+        let separateAudio = !discordApps.isEmpty && display != nil
+        cfg.capturesAudio = !separateAudio
+        if !separateAudio {
+            cfg.sampleRate = 48000
+            cfg.channelCount = 2
+        }
+
+        logLine("creating stream (\(srcWidth)x\(srcHeight) source)")
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-        try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        if !separateAudio {
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        }
         logLine("starting capture")
         try await s.startCapture()
         scStream = s
-        fputs("dc-capture: capturing window \(o.windowID) at \(o.width)x\(o.height)@\(o.fps)\n", stderr)
+
+        if separateAudio, let display {
+            let names = discordApps.map { $0.applicationName }.joined(separator: ", ")
+            logLine("audio from: \(names)")
+            let afilter = SCContentFilter(display: display, including: discordApps, exceptingWindows: [])
+            let acfg = SCStreamConfiguration()
+            acfg.width = 2
+            acfg.height = 2
+            acfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            acfg.queueDepth = 3
+            acfg.showsCursor = false
+            acfg.capturesAudio = true
+            acfg.sampleRate = 48000
+            acfg.channelCount = 2
+            acfg.excludesCurrentProcessAudio = true
+            let a = SCStream(filter: afilter, configuration: acfg, delegate: self)
+            try a.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+            try await a.startCapture()
+            audioStream = a
+        }
+        logLine("capturing window \(o.windowID) -> \(o.width)x\(o.height)@\(o.fps)")
     }
 
     func stop() async {
         try? await scStream?.stopCapture()
+        try? await audioStream?.stopCapture()
     }
 
     // MARK: SCStreamDelegate
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        if stream === audioStream {
+            logLine("audio capture stopped: \(error.localizedDescription) (continuing without audio)")
+            return
+        }
         fputs("dc-capture: capture stopped: \(error.localizedDescription)\n", stderr)
         exitCode = 1
         finished = true
@@ -297,7 +354,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             }
         }
 
+        var peak: Float = 0
+        for v in out { peak = max(peak, abs(v)) }
         lock.lock()
+        audioPeak = max(audioPeak, peak)
         if !sawAudio { logLine("first audio: \(frames) frames, \(channels) ch, \(nonInterleaved ? "planar" : "interleaved")") }
         audio.append(contentsOf: out)
         sawAudio = true
@@ -351,7 +411,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             let pb = latest
             lock.unlock()
             if let pb, pb !== lastBuffer {
-                copyNV12(pb, into: &frame)
+                renderFrame(pb, into: &frame)
                 lastBuffer = pb
             }
 
@@ -386,6 +446,14 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             if !frame.withUnsafeBytes({ writeAll(vfd, $0.baseAddress!, $0.count) }) { return }
 
             n += 1
+            if n % (o.fps * 5) == 0 {
+                lock.lock()
+                let p = audioPeak
+                audioPeak = 0
+                lock.unlock()
+                let db = p > 0 ? 20 * log10(p) : -120
+                logLine(String(format: "audio peak %.0f dBFS%@", db, db < -60 ? " (silent)" : ""))
+            }
             if !warnedNoAudio && !gotAudio && n == o.fps * 5 {
                 fputs("dc-capture: no audio from Discord yet (sending silence)\n", stderr)
                 warnedNoAudio = true
@@ -401,26 +469,138 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         }
     }
 
-    private func copyNV12(_ pb: CVPixelBuffer, into frame: inout [UInt8]) {
+    // MARK: Crop + scale
+
+    /// Copies the captured frame into the output frame: crops away black borders and
+    /// dark window chrome around the video, then scales it to fill the output while
+    /// keeping its aspect ratio.
+    private func renderFrame(_ pb: CVPixelBuffer, into frame: inout [UInt8]) {
         let w = o.width, h = o.height
-        guard CVPixelBufferGetWidth(pb) == w, CVPixelBufferGetHeight(pb) == h,
-              CVPixelBufferGetPlaneCount(pb) == 2 else { return }
+        guard CVPixelBufferGetPlaneCount(pb) == 2 else { return }
+        let sw = CVPixelBufferGetWidth(pb) & ~1, sh = CVPixelBufferGetHeight(pb) & ~1
+        guard sw >= 2, sh >= 2 else { return }
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0),
               let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
         let yStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
         let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-        frame.withUnsafeMutableBytes { dst in
-            let base = dst.baseAddress!
-            for row in 0..<h {
-                memcpy(base + row * w, y + row * yStride, w)
+
+        let crop = o.crop ? updateCrop(y: y, stride: yStride, width: sw, height: sh)
+                          : Box(x0: 0, y0: 0, x1: sw, y1: sh)
+        let cw = crop.x1 - crop.x0, ch = crop.y1 - crop.y0
+
+        // Fit the crop into w x h, centered, even-aligned.
+        let s = min(Double(w) / Double(cw), Double(h) / Double(ch))
+        let dw = min(w, max(2, Int(Double(cw) * s) & ~1))
+        let dh = min(h, max(2, Int(Double(ch) * s) & ~1))
+        let dx = ((w - dw) / 2) & ~1, dy = ((h - dh) / 2) & ~1
+
+        let layout = Box(x0: dx, y0: dy, x1: dx + dw, y1: dy + dh)
+        if layout != lastLayout {
+            // Letterbox areas changed: clear to black.
+            frame.withUnsafeMutableBytes { b in
+                memset(b.baseAddress!, 16, w * h)
+                memset(b.baseAddress! + w * h, 128, w * h / 2)
             }
-            let uvBase = base + w * h
-            for row in 0..<(h / 2) {
-                memcpy(uvBase + row * w, uv + row * uvStride, w)
+            lastLayout = layout
+        }
+
+        frame.withUnsafeMutableBytes { b in
+            let base = b.baseAddress!
+            var srcY = vImage_Buffer(data: y + crop.y0 * yStride + crop.x0,
+                                     height: vImagePixelCount(ch), width: vImagePixelCount(cw), rowBytes: yStride)
+            var dstY = vImage_Buffer(data: base + dy * w + dx,
+                                     height: vImagePixelCount(dh), width: vImagePixelCount(dw), rowBytes: w)
+            vImageScale_Planar8(&srcY, &dstY, nil, vImage_Flags(kvImageHighQualityResampling))
+
+            var srcUV = vImage_Buffer(data: uv + (crop.y0 / 2) * uvStride + crop.x0,
+                                      height: vImagePixelCount(ch / 2), width: vImagePixelCount(cw / 2), rowBytes: uvStride)
+            var dstUV = vImage_Buffer(data: base + w * h + (dy / 2) * w + dx,
+                                      height: vImagePixelCount(dh / 2), width: vImagePixelCount(dw / 2), rowBytes: w)
+            vImageScale_CbCr8(&srcUV, &dstUV, nil, vImage_Flags(kvImageHighQualityResampling))
+        }
+    }
+
+    private var lastLayout: Box?
+    private var framesSinceDetect = 0
+
+    /// Returns the crop box, re-detecting the video area about twice a second. The box is
+    /// the union of detections from the last 10 s, so a dark scene doesn't shrink it and
+    /// hovering Discord's controls only widens it briefly.
+    private func updateCrop(y: UnsafeMutableRawPointer, stride: Int, width: Int, height: Int) -> Box {
+        let full = Box(x0: 0, y0: 0, x1: width, y1: height)
+        framesSinceDetect += 1
+        let now = Date().timeIntervalSinceReferenceDate
+        if currentCrop == nil || framesSinceDetect >= max(1, o.fps / 4) {
+            framesSinceDetect = 0
+            if let b = detectContent(y: y.assumingMemoryBound(to: UInt8.self), stride: stride, width: width, height: height) {
+                detections.append((time: now, box: b))
+            }
+            detections.removeAll { now - $0.time > 10 }
+            var u: Box? = nil
+            for d in detections { u = u.map { $0.union(d.box) } ?? d.box }
+            let next = (u ?? full).clamped(to: full).evenAligned()
+            // Small wobble (hover controls, compression noise) shouldn't re-layout the frame.
+            if currentCrop == nil || !currentCrop!.nearlyEqual(next) {
+                logLine("video area \(next.x1 - next.x0)x\(next.y1 - next.y0) at \(next.x0),\(next.y0) of \(width)x\(height)")
+                currentCrop = next
             }
         }
+        return (currentCrop ?? full).clamped(to: full).evenAligned()
+    }
+
+    /// Bounding box of rows/columns that aren't (nearly) black or dark-gray chrome.
+    /// Returns nil when the frame is mostly dark (can't tell where the video is).
+    private func detectContent(y: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int) -> Box? {
+        let threshold: UInt8 = 52      // video-range luma; Discord's dark chrome sits below this
+        let step = 4
+        func rowHasContent(_ r: Int) -> Bool {
+            var hits = 0, total = 0
+            var x = 0
+            while x < width { total += 1; if y[r * stride + x] > threshold { hits += 1 }; x += step }
+            return hits * 50 > total   // > 2% of the row
+        }
+        func colHasContent(_ c: Int, _ r0: Int, _ r1: Int) -> Bool {
+            var hits = 0, total = 0
+            var r = r0
+            while r < r1 { total += 1; if y[r * stride + c] > threshold { hits += 1 }; r += step }
+            return total > 0 && hits * 50 > total
+        }
+        var top = 0
+        while top < height && !rowHasContent(top) { top += 2 }
+        var bottom = height - 1
+        while bottom > top && !rowHasContent(bottom) { bottom -= 2 }
+        guard bottom > top else { return nil }
+        var left = 0
+        while left < width && !colHasContent(left, top, bottom) { left += 2 }
+        var right = width - 1
+        while right > left && !colHasContent(right, top, bottom) { right -= 2 }
+        guard right > left else { return nil }
+        let box = Box(x0: left, y0: top, x1: right + 1, y1: bottom + 1)
+        // Too small to be the video (dark scene, or just a few bright UI bits).
+        if (box.x1 - box.x0) * (box.y1 - box.y0) * 4 < width * height { return nil }
+        return box
+    }
+}
+
+struct Box: Equatable {
+    var x0: Int, y0: Int, x1: Int, y1: Int
+    func union(_ b: Box) -> Box {
+        Box(x0: min(x0, b.x0), y0: min(y0, b.y0), x1: max(x1, b.x1), y1: max(y1, b.y1))
+    }
+    func clamped(to f: Box) -> Box {
+        Box(x0: max(x0, f.x0), y0: max(y0, f.y0), x1: min(x1, f.x1), y1: min(y1, f.y1))
+    }
+    func evenAligned() -> Box {
+        var b = Box(x0: x0 & ~1, y0: y0 & ~1, x1: (x1 + 1) & ~1, y1: (y1 + 1) & ~1)
+        if b.x1 - b.x0 < 2 { b.x1 = b.x0 + 2 }
+        if b.y1 - b.y0 < 2 { b.y1 = b.y0 + 2 }
+        return b
+    }
+    func nearlyEqual(_ b: Box) -> Bool {
+        let tol = max(8, (x1 - x0) / 100)
+        return abs(x0 - b.x0) <= tol && abs(y0 - b.y0) <= tol && abs(x1 - b.x1) <= tol && abs(y1 - b.y1) <= tol
     }
 }
 

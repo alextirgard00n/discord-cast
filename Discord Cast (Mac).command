@@ -103,11 +103,11 @@ while true; do
   WID="${IDS[$((c - 1))]}"
   echo
   echo "  1) Cast to TV"
-  echo "  2) Cast to TV, 2 s segments (steadier, more delay)"
+  echo "  2) Cast to TV, lower delay (1 s segments; may stutter)"
   echo "  3) Preview in Safari on this Mac (checks the capture side, no TV)"
   read -r -p "Choose [1]: " m
   case "${m:-1}" in
-    2) MODE=(--device "$DEVICE" --segment 2 --buffer 6) ;;
+    2) MODE=(--device "$DEVICE" --segment 1 --buffer 4) ;;
     3) MODE=(--preview) ;;
     *) MODE=(--device "$DEVICE") ;;
   esac

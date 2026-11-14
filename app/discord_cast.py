@@ -7,8 +7,8 @@ plus Discord's audio to a Google Cast TV.
   ffmpeg (VideoToolbox HEVC)     --1 s fMP4 HLS in a temp dir-->   HTTP server on the LAN
   Cast Default Media Receiver on the TV plays the HLS URL.
 
-Settings come from the Phase 0 tests on the LG C5: HEVC, fMP4, 1 s segments, 60 fps
-(0.5 s segments stuttered and rebuffered).
+Settings come from testing on the LG C5: HEVC, fMP4, 60 fps, 2 s segments, starting
+6 s behind live (1 s segments rebuffered every few seconds with real content).
 
   python discord_cast.py --windows                     # list capturable Discord windows
   python discord_cast.py --tvs                         # list Cast devices
@@ -201,8 +201,9 @@ def main() -> None:
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--kbps", type=int, default=16000, help="video bitrate")
-    p.add_argument("--segment", type=float, default=1.0, help="HLS segment seconds (0.5 rebuffers on the LG C5)")
-    p.add_argument("--buffer", type=float, default=4.0,
+    p.add_argument("--segment", type=float, default=2.0,
+                   help="HLS segment seconds (LG C5: 2 plays steadily, 1 rebuffers with real content, 0.5 fails)")
+    p.add_argument("--buffer", type=float, default=6.0,
                    help="seconds behind the newest segment the TV starts playing (more = smoother, more delay)")
     p.add_argument("--encoder", default="hevc_videotoolbox")
     p.add_argument("--port", type=int, default=8765)

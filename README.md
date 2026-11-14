@@ -24,7 +24,8 @@ Targets: Windows (RTX) and macOS (Apple silicon). Tested receiver: LG C5 (Google
 - **Phase 0 (done):** the LG C5's Cast receiver plays HEVC 4K60 in fMP4 HLS smoothly.
   1 s segments work; 0.5 s segments stutter and rebuffer. 30 fps visibly judders, 60 fps doesn't.
 - **Phase 1 (macOS, testing):** cast the popped-out Discord stream window plus Discord's audio,
-  HEVC 1080p60, no upscaling or frame gen yet.
+  HEVC 1080p60 with 2 s segments (1 s rebuffered on the C5 with real content). The video area
+  is detected and cropped automatically so it fills the TV. No upscaling or frame gen yet.
 
 See [docs/PLAN.md](docs/PLAN.md) for the full roadmap.
 
