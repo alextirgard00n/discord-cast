@@ -68,16 +68,38 @@ class HLSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def do_GET(self):
+        # Serve the playlist with an EXT-X-START tag so the TV starts a few seconds
+        # behind the newest segment. Without it the LG's Cast player starts at the
+        # live edge, plays ~2 s, runs dry and rebuffers every few seconds.
+        if self.path.split("?")[0].endswith("index.m3u8"):
+            try:
+                text = Path(self.directory, "index.m3u8").read_text()
+            except OSError:
+                self.send_error(404)
+                return
+            tag = f"#EXT-X-START:TIME-OFFSET=-{self.server.start_offset:.1f},PRECISE=YES\n"  # type: ignore[attr-defined]
+            text = text.replace("#EXTM3U\n", "#EXTM3U\n" + tag, 1)
+            body = text.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
     def log_message(self, fmt, *args):
         if self.server.verbose:  # type: ignore[attr-defined]
             sys.stderr.write("[http] " + (fmt % args) + "\n")
 
 
-def start_http(root: Path, port: int, verbose: bool) -> http.server.ThreadingHTTPServer:
+def start_http(root: Path, port: int, verbose: bool, start_offset: float) -> http.server.ThreadingHTTPServer:
     handler = functools.partial(HLSHandler, directory=str(root))
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
     srv.daemon_threads = True
     srv.verbose = verbose  # type: ignore[attr-defined]
+    srv.start_offset = start_offset  # type: ignore[attr-defined]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -106,8 +128,8 @@ def build_ffmpeg(a, tmp: Path, vfifo: Path, afifo: Path) -> list[str]:
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
         "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-        "-f", "hls", "-hls_time", str(a.segment), "-hls_list_size", "6",
-        "-hls_flags", "delete_segments+independent_segments+omit_endlist",
+        "-f", "hls", "-hls_time", str(a.segment), "-hls_list_size", "10",
+        "-hls_flags", "delete_segments+independent_segments+omit_endlist+program_date_time",
         "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
         "-hls_segment_filename", str(tmp / "seg_%05d.m4s"), str(tmp / "index.m3u8"),
     ]
@@ -180,6 +202,8 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--kbps", type=int, default=16000, help="video bitrate")
     p.add_argument("--segment", type=float, default=1.0, help="HLS segment seconds (0.5 rebuffers on the LG C5)")
+    p.add_argument("--buffer", type=float, default=4.0,
+                   help="seconds behind the newest segment the TV starts playing (more = smoother, more delay)")
     p.add_argument("--encoder", default="hevc_videotoolbox")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")
@@ -203,7 +227,7 @@ def main() -> None:
     vfifo, afifo = tmp / "video.fifo", tmp / "audio.fifo"
     os.mkfifo(vfifo)
     os.mkfifo(afifo)
-    srv = start_http(tmp, a.port, a.verbose)
+    srv = start_http(tmp, a.port, a.verbose, a.buffer)
     url = f"http://{lan_ip()}:{a.port}/index.m3u8"
 
     # ffmpeg first; it and dc-capture both open the audio FIFO, then the video FIFO.
@@ -256,7 +280,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
 
     try:
-        wait_for_segments(tmp, 3, {"dc-capture": cap, "ffmpeg": ff})
+        # Enough segments for the TV to start --buffer seconds back.
+        wait_for_segments(tmp, int(a.buffer / a.segment) + 2, {"dc-capture": cap, "ffmpeg": ff})
     except StartError as e:
         print(e, flush=True)
         shutdown(code=1)
