@@ -195,7 +195,8 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         cfg.showsCursor = false
         cfg.scalesToFit = true
         cfg.preservesAspectRatio = true
-        cfg.backgroundColor = CGColor(gray: 0, alpha: 1)
+        // No backgroundColor: the property doesn't retain its CGColor, so a temporary
+        // one is freed before SCStream copies the config (crash). The default is black.
         cfg.capturesAudio = true
         cfg.sampleRate = 48000
         cfg.channelCount = 2
