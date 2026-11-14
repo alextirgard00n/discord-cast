@@ -121,6 +121,16 @@ def encoder_args(enc: str, kbps: int, gop: int) -> list[str]:
             "-sc_threshold", "0"]
 
 
+@functools.lru_cache(maxsize=None)
+def has_filter(ffmpeg: str, name: str) -> bool:
+    """Some ffmpeg builds (e.g. current Homebrew) ship without drawtext."""
+    try:
+        out = subprocess.run([ffmpeg, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
+
+
 def source_args(a, w: int, h: int) -> tuple[list[str], list[str]]:
     """Returns (input args, video filter chain)."""
     if a.source == "pattern":
@@ -136,11 +146,12 @@ def source_args(a, w: int, h: int) -> tuple[list[str], list[str]]:
             if os.path.exists(f):
                 font = "fontfile='" + f.replace(":", "\\:") + "':"
                 break
-        vf = [
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t,1),0.1)'",
-            f"drawtext={font}text='%{{pts\\:hms}}':fontsize={fs}:fontcolor=white:box=1:boxcolor=black@0.7:"
-            f"boxborderw={fs // 4}:x=(w-tw)/2:y=h-th-{fs}",
-        ]
+        vf = [f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t,1),0.1)'"]
+        if has_filter(a.ffmpeg, "drawtext"):
+            vf.append(f"drawtext={font}text='%{{pts\\:hms}}':fontsize={fs}:fontcolor=white:box=1:boxcolor=black@0.7:"
+                      f"boxborderw={fs // 4}:x=(w-tw)/2:y=h-th-{fs}")
+        else:
+            print("! this ffmpeg has no drawtext filter; the on-screen timer is skipped (flash + beep still work)")
         return vin + ain, vf
 
     # Screen capture. The real app captures just the Discord window with WGC /
